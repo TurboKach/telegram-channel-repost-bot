@@ -467,7 +467,7 @@ async def handle_media(message: Message):
         # Create user info dict for notification
         user_info = {
             'id': message.from_user.id,
-            'username': message.from_user.username or f"User_{message.from_user.id}"
+            'username': f'@{message.from_user.username}' or f"User_{message.from_user.id}"
         }
 
         # Post immediately
