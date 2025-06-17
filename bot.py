@@ -715,7 +715,58 @@ async def process_suggestion_action(callback_query: types.CallbackQuery):
 @dp.message(Command("add_admin"))
 async def add_admin(message: Message):
     if message.from_user.id != MAIN_ADMIN_ID:
-        await message.reply("Error adding admin. Please try again later.")
+        await message.reply("Only the main admin can add administrators.")
+        return
+
+    try:
+        admin_id = int(message.text.split()[1])
+        admins = load_admins()
+        
+        if admin_id in admins:
+            await message.reply(f"User {admin_id} is already an admin.")
+            return
+            
+        if admin_id == MAIN_ADMIN_ID:
+            await message.reply("You are already the main admin.")
+            return
+
+        # Try to get user info to get their username
+        try:
+            user_info = await bot.get_chat(admin_id)
+            username = user_info.username or user_info.first_name or f"User_{admin_id}"
+        except Exception as e:
+            logger.warning(f"Could not get user info for {admin_id}: {e}")
+            username = f"User_{admin_id}"
+
+        # Add the admin
+        admins[admin_id] = username
+        save_admins(admins)
+
+        # Set commands for the new admin
+        await set_commands_for_user(admin_id, is_admin=True)
+
+        await message.reply(f"✅ Admin {username} ({admin_id}) added successfully.")
+        
+        # Notify the new admin
+        try:
+            await bot.send_message(
+                admin_id, 
+                f"🔰 You have been added as an administrator by the main admin.\n"
+                f"Use /help to see available admin commands."
+            )
+        except Exception as e:
+            logger.warning(f"Could not notify new admin {admin_id}: {e}")
+            await message.reply(f"⚠️ Admin added but could not send notification. "
+                              f"Make sure the user has started the bot first.")
+
+        # Log the action
+        logger.info(f"Main admin {message.from_user.id} added new admin: {admin_id} ({username})")
+
+    except (IndexError, ValueError):
+        await message.reply("Please provide a valid user ID: /add_admin USER_ID")
+    except Exception as e:
+        logger.error(f"Error adding admin: {e}")
+        await message.reply(f"Error adding admin: {str(e)}")
 
 
 @dp.message(Command("remove_admin"))
