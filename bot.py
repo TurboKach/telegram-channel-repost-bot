@@ -34,6 +34,7 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
 MAIN_ADMIN_ID = int(os.getenv('MAIN_ADMIN_ID'))
 TIMEZONE = pytz.timezone(os.getenv('TIMEZONE', 'UTC'))
+WATERMARK_TEXT = os.getenv('WATERMARK_TEXT', 'TEST_WATERMARK')
 
 # Flood control settings
 MAX_SUGGESTIONS_PER_DAY = 20
@@ -563,9 +564,7 @@ async def process_suggestion_action(callback_query: types.CallbackQuery):
                     for file_id in media_ids:
                         # Create InputMediaPhoto objects for each photo
                         media = types.InputMediaPhoto(media=file_id)
-                        # Add caption only to the first media item
-                        if media_ids.index(file_id) == 0 and caption:
-                            media.caption = caption
+                        # No caption to remove origin names and URLs
                         media_group.append(media)
 
                     await bot.send_media_group(chat_id=CHANNEL_ID, media=media_group)
@@ -578,7 +577,7 @@ async def process_suggestion_action(callback_query: types.CallbackQuery):
 
                         watermarked = await add_watermark_to_bytes(
                             photo_bytes,
-                            watermark_text="@TOOLOCAL",  # Change this to your watermark text
+                            watermark_text=WATERMARK_TEXT,
                             opacity=128,
                             text_width_ratio=0.33,
                             shadow_offset=3,
@@ -590,26 +589,26 @@ async def process_suggestion_action(callback_query: types.CallbackQuery):
                             photo=types.BufferedInputFile(
                                 watermarked.getvalue(),
                                 filename="watermarked.jpg"
-                            ),
-                            caption=caption
+                            )
+                            # No caption to remove origin names and URLs
                         )
                     except Exception as e:
                         logger.error(f"Error processing photo watermark: {e}")
                         # Fallback to sending original photo
-                        await bot.send_photo(chat_id=CHANNEL_ID, photo=media_ids[0], caption=caption)
+                        await bot.send_photo(chat_id=CHANNEL_ID, photo=media_ids[0])
 
             elif media_type == "video":
-                await bot.send_video(chat_id=CHANNEL_ID, video=media_ids[0], caption=caption)
+                await bot.send_video(chat_id=CHANNEL_ID, video=media_ids[0])
             elif media_type == "animation":
-                await bot.send_animation(chat_id=CHANNEL_ID, animation=media_ids[0], caption=caption)
+                await bot.send_animation(chat_id=CHANNEL_ID, animation=media_ids[0])
             elif media_type == "video_note":
                 await bot.send_video_note(chat_id=CHANNEL_ID, video_note=media_ids[0])
             elif media_type == "voice":
-                await bot.send_voice(chat_id=CHANNEL_ID, voice=media_ids[0], caption=caption)
+                await bot.send_voice(chat_id=CHANNEL_ID, voice=media_ids[0])
             elif media_type == "audio":
-                await bot.send_audio(chat_id=CHANNEL_ID, audio=media_ids[0], caption=caption)
+                await bot.send_audio(chat_id=CHANNEL_ID, audio=media_ids[0])
             elif media_type == "document":
-                await bot.send_document(chat_id=CHANNEL_ID, document=media_ids[0], caption=caption)
+                await bot.send_document(chat_id=CHANNEL_ID, document=media_ids[0])
 
             # Update last post time
             post_tracker.update_last_post_time(datetime.now(TIMEZONE))
@@ -1058,7 +1057,7 @@ async def status_command(message: Message):
 
 # Handler for media groups
 async def process_media_group(user_id: int, username: str, media_group_id: str,
-                              media_type: str, file_id: str, message_id: Optional[int] = None, caption: Optional[str] = None):
+                              media_type: str, file_id: str, message_id: Optional[int] = None, caption: Optional[str] = None, is_admin: bool = False):
     """Process and collect media group items"""
     current_time = time.time()
 
@@ -1072,7 +1071,8 @@ async def process_media_group(user_id: int, username: str, media_group_id: str,
             "caption": caption,
             "last_update": current_time,
             "first_message_id": message_id,
-            "complete": False
+            "complete": False,
+            "is_admin": is_admin
         }
 
     # Add this media to the group
@@ -1159,6 +1159,108 @@ async def handle_complete_media_group(media_group_id: str):
     del media_group_collector[media_group_id]
 
 
+# Function to handle a complete admin media group (post directly to channel)
+async def handle_complete_admin_media_group(media_group_id: str):
+    """Process a complete admin media group and post directly to channel"""
+    if media_group_id not in media_group_collector:
+        return
+
+    group_data = media_group_collector[media_group_id]
+
+    # Mark as complete to prevent duplicate processing
+    if group_data["complete"]:
+        return
+
+    group_data["complete"] = True
+
+    user_id = group_data["user_id"]
+    username = group_data["username"]
+    media_ids = group_data["media_ids"]
+    media_type = group_data["media_type"]
+
+    try:
+        # Create user info dict for notification
+        user_info = {
+            'id': user_id,
+            'username': username
+        }
+
+        # Post media group directly to channel
+        if media_type == "photo":
+            # For photos, create media group without captions
+            media_group = []
+            for file_id in media_ids:
+                try:
+                    # Download and watermark each photo
+                    file = await bot.get_file(file_id)
+                    photo_io = await bot.download_file(file.file_path)
+                    photo_bytes = photo_io.read()
+
+                    watermarked = await add_watermark_to_bytes(
+                        photo_bytes,
+                        watermark_text=WATERMARK_TEXT,
+                        opacity=128,
+                        text_width_ratio=0.33,
+                        shadow_offset=3,
+                        shadow_opacity=40
+                    )
+
+                    media = types.InputMediaPhoto(
+                        media=types.BufferedInputFile(
+                            watermarked.getvalue(),
+                            filename=f"watermarked_{media_ids.index(file_id)}.jpg"
+                        )
+                    )
+                    # No caption to remove origin names and URLs
+                    media_group.append(media)
+                except Exception as e:
+                    logger.error(f"Error watermarking photo in media group: {e}")
+                    # Fallback to original photo
+                    media = types.InputMediaPhoto(media=file_id)
+                    media_group.append(media)
+
+            await bot.send_media_group(chat_id=CHANNEL_ID, media=media_group)
+        else:
+            # For other media types, send each item individually
+            for file_id in media_ids:
+                if media_type == "video":
+                    await bot.send_video(chat_id=CHANNEL_ID, video=file_id)
+                elif media_type == "animation":
+                    await bot.send_animation(chat_id=CHANNEL_ID, animation=file_id)
+                elif media_type == "document":
+                    await bot.send_document(chat_id=CHANNEL_ID, document=file_id)
+                elif media_type == "audio":
+                    await bot.send_audio(chat_id=CHANNEL_ID, audio=file_id)
+                elif media_type == "voice":
+                    await bot.send_voice(chat_id=CHANNEL_ID, voice=file_id)
+                # Note: video_note doesn't support media groups in Telegram
+
+        # Update last post time
+        post_tracker.update_last_post_time(datetime.now(TIMEZONE))
+
+        # Notify admin of successful posting
+        try:
+            await bot.send_message(user_id, f"✅ Media group posted successfully to channel!")
+        except Exception as e:
+            logger.error(f"Error notifying admin {user_id} about successful post: {e}")
+
+        # Notify main admin
+        await notify_main_admin(
+            user_info,
+            f"posted a {media_type} media group ({len(media_ids)} items)"
+        )
+
+    except Exception as e:
+        logger.error(f"Error processing admin media group: {e}")
+        try:
+            await bot.send_message(user_id, f"❌ Error posting media group: {str(e)}")
+        except Exception as e2:
+            logger.error(f"Error notifying admin about error: {e2}")
+
+    # Clean up the collector
+    del media_group_collector[media_group_id]
+
+
 # Background task to process complete media groups
 async def media_group_cleanup_task():
     """Background task to clean up and process media groups that are complete but haven't been processed"""
@@ -1173,7 +1275,11 @@ async def media_group_cleanup_task():
 
         # Process complete groups
         for media_group_id in groups_to_process:
-            await handle_complete_media_group(media_group_id)
+            # Check if it's an admin media group
+            if media_group_id in media_group_collector and media_group_collector[media_group_id].get("is_admin", False):
+                await handle_complete_admin_media_group(media_group_id)
+            else:
+                await handle_complete_media_group(media_group_id)
 
         # Sleep for a short time
         await asyncio.sleep(1)
@@ -1253,7 +1359,8 @@ async def handle_admin_message(message: Message):
                 media_group_id=message.media_group_id,
                 media_type=media_type,
                 file_id=media.file_id,
-                caption=message.caption
+                caption=message.caption,
+                is_admin=True
             )
 
             # We don't immediately post media groups
@@ -1271,7 +1378,7 @@ async def handle_admin_message(message: Message):
                 # Add watermark
                 watermarked = await add_watermark_to_bytes(
                     photo_bytes,
-                    watermark_text="@TOOLOCAL",  # Change this to your watermark text
+                    watermark_text=WATERMARK_TEXT,
                     opacity=128,
                     text_width_ratio=0.33,
                     shadow_offset=3,
@@ -1284,8 +1391,8 @@ async def handle_admin_message(message: Message):
                     photo=types.BufferedInputFile(
                         watermarked.getvalue(),
                         filename="watermarked.jpg"
-                    ),
-                    caption=message.caption if message.caption else None
+                    )
+                    # No caption to remove origin names and URLs
                 )
             except Exception as e:
                 logger.error(f"Error processing photo watermark: {e}")
