@@ -328,63 +328,128 @@ def process_image(image_bytes, watermark_text, opacity, text_width_ratio, shadow
     watermark = Image.new('RGBA', img_copy.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(watermark)
 
-    # Calculate base font size from image dimensions
-    base_font_size = int(min(img_copy.width, img_copy.height) / 15)  # Changed this line
-    logger.info(f"Base font size: {base_font_size} for image {img_copy.width}x{img_copy.height}")
-
-    # Available fonts
+    # Available fonts (Ubuntu paths first, then macOS for local testing)
     font_paths = [
+        # Ubuntu/Debian - Liberation fonts (usually pre-installed)
         '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
         '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
+        # Ubuntu/Debian - DejaVu fonts (common fallback)
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+        # Ubuntu - Ubuntu font family
+        '/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf',
+        '/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf',
+        # macOS (for local development/testing)
+        '/System/Library/Fonts/Supplemental/Arial Bold.ttf',
+        '/System/Library/Fonts/Supplemental/Arial.ttf',
     ]
 
-    # Find first available font with proper size
-    available_font = None
-    font = None
-
+    # Find first available font path
+    available_font_path = None
     for font_path in font_paths:
         try:
-            font = ImageFont.truetype(font_path, size=base_font_size)
-            available_font = font_path
-            logger.info(f"Using font: {font_path} with size {base_font_size}")
+            test_font = ImageFont.truetype(font_path, size=20)
+            available_font_path = font_path
+            logger.info(f"Found available font: {font_path}")
             break
         except Exception as e:
-            logger.debug(f"Failed to load font {font_path}: {str(e)}")
+            logger.debug(f"Font not available {font_path}: {str(e)}")
             continue
 
-    if not available_font:
+    # Calculate target text width based on ratio
+    target_text_width = img_copy.width * text_width_ratio
+    logger.info(f"Target text width: {target_text_width}px (ratio: {text_width_ratio})")
+
+    # Calculate optimal font size using binary search
+    if available_font_path:
+        min_size = 10
+        max_size = int(img_copy.height * 0.4)  # Max 40% of image height
+        best_font_size = min_size
+        best_font = None
+
+        # Binary search for optimal font size
+        for iteration in range(20):  # Max 20 iterations
+            current_size = (min_size + max_size) // 2
+
+            try:
+                test_font = ImageFont.truetype(available_font_path, size=current_size)
+                bbox = draw.textbbox((0, 0), watermark_text, font=test_font)
+                current_text_width = bbox[2] - bbox[0]
+
+                # Within 3% of target is acceptable
+                if abs(current_text_width - target_text_width) < target_text_width * 0.03:
+                    best_font_size = current_size
+                    best_font = test_font
+                    logger.info(f"Found optimal font size: {current_size}px after {iteration + 1} iterations")
+                    break
+
+                if current_text_width < target_text_width:
+                    min_size = current_size + 1
+                    best_font_size = current_size
+                    best_font = test_font
+                else:
+                    max_size = current_size - 1
+
+            except Exception as e:
+                logger.error(f"Error during font size calculation: {e}")
+                break
+
+        if best_font is None:
+            best_font = ImageFont.truetype(available_font_path, size=best_font_size)
+
+        font = best_font
+        base_font_size = best_font_size
+
+    else:
+        # Fallback: use larger multiplier if no TrueType font available
         logger.warning("No TrueType fonts found, using default font")
         font = ImageFont.load_default()
+        base_font_size = 11  # Default font size
 
-    # Get text size
+    # Get final text dimensions
     bbox = draw.textbbox((0, 0), watermark_text, font=font)
     text_width = bbox[2] - bbox[0]
     text_height = bbox[3] - bbox[1]
 
-    logger.info(f"Text dimensions: {text_width}x{text_height} (target: {img_copy.width * text_width_ratio})")
+    logger.info(f"Final text dimensions: {text_width}x{text_height} with font size {base_font_size}px")
+    logger.info(f"Image dimensions: {img_copy.width}x{img_copy.height}")
 
     # Calculate position with padding
-    padding = min(img_copy.width, img_copy.height) // 30  # Dynamic padding based on image size
+    padding = max(20, min(img_copy.width, img_copy.height) // 30)  # Dynamic padding, minimum 20px
     max_x = img_copy.width - text_width - padding
     max_y = img_copy.height - text_height - padding
 
-    if max_x < padding: max_x = padding
-    if max_y < padding: max_y = padding
+    if max_x < padding:
+        max_x = padding
+    if max_y < padding:
+        max_y = padding
 
     x = random.randint(padding, max_x)
     y = random.randint(padding, max_y)
 
-    # Draw the shadow
-    draw.text((x + shadow_offset, y + shadow_offset),
-              watermark_text,
-              font=font,
-              fill=(0, 0, 0, shadow_opacity))
+    logger.info(f"Watermark position: ({x}, {y})")
 
-    # Draw the main text
-    draw.text((x, y),
-              watermark_text,
-              font=font,
-              fill=(255, 255, 255, opacity))
+    # Calculate stroke width for better visibility
+    stroke_width = max(2, base_font_size // 15)
+
+    # Draw the shadow (larger offset for better visibility)
+    shadow_offset_scaled = max(shadow_offset, base_font_size // 20)
+    draw.text(
+        (x + shadow_offset_scaled, y + shadow_offset_scaled),
+        watermark_text,
+        font=font,
+        fill=(0, 0, 0, shadow_opacity)
+    )
+
+    # Draw the main text with stroke/outline for better visibility
+    draw.text(
+        (x, y),
+        watermark_text,
+        font=font,
+        fill=(255, 255, 255, opacity),
+        stroke_width=stroke_width,
+        stroke_fill=(0, 0, 0, min(255, shadow_opacity + 40))
+    )
 
     # Combine the original image with the watermark
     watermarked = Image.alpha_composite(img_copy, watermark)
@@ -392,7 +457,7 @@ def process_image(image_bytes, watermark_text, opacity, text_width_ratio, shadow
     # Convert back to RGB
     watermarked = watermarked.convert('RGB')
 
-    # Save to BytesIO object
+    # Save to BytesIO object with high quality
     output = BytesIO()
     watermarked.save(output, format='JPEG', quality=95)
     output.seek(0)
