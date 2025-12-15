@@ -7,9 +7,10 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import BotCommand, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
 from dotenv import load_dotenv
 import pytz
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Callable, Any
 from io import TextIOWrapper, BytesIO
 from PIL import Image, ImageDraw, ImageFont
 import random
@@ -21,6 +22,75 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(name)s - %(funcName)s:%(lineno)d - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+# Rate limiter for channel posts
+class ChannelRateLimiter:
+    """Rate limiter to prevent hitting Telegram flood control"""
+    def __init__(self, min_interval: float = 0.7):
+        self.min_interval = min_interval  # Minimum seconds between messages
+        self.last_send_time = 0
+        self._lock = asyncio.Lock()
+
+    async def wait_if_needed(self):
+        """Wait if necessary to respect rate limits"""
+        async with self._lock:
+            current_time = time.time()
+            time_since_last = current_time - self.last_send_time
+
+            if time_since_last < self.min_interval:
+                wait_time = self.min_interval - time_since_last
+                logger.info(f"Rate limiting: waiting {wait_time:.2f}s before sending to channel")
+                await asyncio.sleep(wait_time)
+
+            self.last_send_time = time.time()
+
+
+# Initialize rate limiter
+channel_rate_limiter = ChannelRateLimiter(min_interval=0.7)
+
+
+async def send_to_channel_with_retry(send_func: Callable, max_retries: int = 3, **kwargs) -> Any:
+    """
+    Wrapper to send messages to channel with retry logic and rate limiting.
+
+    Args:
+        send_func: The bot.send_* function to call
+        max_retries: Maximum number of retry attempts
+        **kwargs: Arguments to pass to send_func
+
+    Returns:
+        The result of the send function
+    """
+    # Apply rate limiting before sending
+    await channel_rate_limiter.wait_if_needed()
+
+    for attempt in range(max_retries):
+        try:
+            result = await send_func(**kwargs)
+            return result
+
+        except TelegramRetryAfter as e:
+            # Telegram told us to wait - respect it
+            retry_after = e.retry_after
+            logger.warning(
+                f"Flood control hit on attempt {attempt + 1}/{max_retries}. "
+                f"Waiting {retry_after}s as instructed by Telegram..."
+            )
+
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_after + 0.5)  # Add 0.5s buffer
+            else:
+                logger.error(f"Failed after {max_retries} attempts due to flood control")
+                raise
+
+        except Exception as e:
+            # Other errors - don't retry
+            logger.error(f"Error sending to channel: {e}")
+            raise
+
+    raise Exception(f"Failed to send after {max_retries} retries")
+
 
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -632,7 +702,11 @@ async def process_suggestion_action(callback_query: types.CallbackQuery):
                         # No caption to remove origin names and URLs
                         media_group.append(media)
 
-                    await bot.send_media_group(chat_id=CHANNEL_ID, media=media_group)
+                    await send_to_channel_with_retry(
+                        bot.send_media_group,
+                        chat_id=CHANNEL_ID,
+                        media=media_group
+                    )
                 else:  # Single photo
                     try:
                         # Download and watermark the photo
@@ -649,31 +723,35 @@ async def process_suggestion_action(callback_query: types.CallbackQuery):
                             shadow_opacity=40
                         )
 
-                        await bot.send_photo(
+                        await send_to_channel_with_retry(
+                            bot.send_photo,
                             chat_id=CHANNEL_ID,
                             photo=types.BufferedInputFile(
                                 watermarked.getvalue(),
                                 filename="watermarked.jpg"
                             )
-                            # No caption to remove origin names and URLs
                         )
                     except Exception as e:
                         logger.error(f"Error processing photo watermark: {e}")
                         # Fallback to sending original photo
-                        await bot.send_photo(chat_id=CHANNEL_ID, photo=media_ids[0])
+                        await send_to_channel_with_retry(
+                            bot.send_photo,
+                            chat_id=CHANNEL_ID,
+                            photo=media_ids[0]
+                        )
 
             elif media_type == "video":
-                await bot.send_video(chat_id=CHANNEL_ID, video=media_ids[0])
+                await send_to_channel_with_retry(bot.send_video, chat_id=CHANNEL_ID, video=media_ids[0])
             elif media_type == "animation":
-                await bot.send_animation(chat_id=CHANNEL_ID, animation=media_ids[0])
+                await send_to_channel_with_retry(bot.send_animation, chat_id=CHANNEL_ID, animation=media_ids[0])
             elif media_type == "video_note":
-                await bot.send_video_note(chat_id=CHANNEL_ID, video_note=media_ids[0])
+                await send_to_channel_with_retry(bot.send_video_note, chat_id=CHANNEL_ID, video_note=media_ids[0])
             elif media_type == "voice":
-                await bot.send_voice(chat_id=CHANNEL_ID, voice=media_ids[0])
+                await send_to_channel_with_retry(bot.send_voice, chat_id=CHANNEL_ID, voice=media_ids[0])
             elif media_type == "audio":
-                await bot.send_audio(chat_id=CHANNEL_ID, audio=media_ids[0])
+                await send_to_channel_with_retry(bot.send_audio, chat_id=CHANNEL_ID, audio=media_ids[0])
             elif media_type == "document":
-                await bot.send_document(chat_id=CHANNEL_ID, document=media_ids[0])
+                await send_to_channel_with_retry(bot.send_document, chat_id=CHANNEL_ID, document=media_ids[0])
 
             # Update last post time
             post_tracker.update_last_post_time(datetime.now(TIMEZONE))
@@ -1335,20 +1413,24 @@ async def handle_complete_admin_media_group(media_group_id: str):
                     media = types.InputMediaPhoto(media=file_id)
                     media_group.append(media)
 
-            await bot.send_media_group(chat_id=CHANNEL_ID, media=media_group)
+            await send_to_channel_with_retry(
+                bot.send_media_group,
+                chat_id=CHANNEL_ID,
+                media=media_group
+            )
         else:
-            # For other media types, send each item individually
+            # For other media types, send each item individually with delay
             for file_id in media_ids:
                 if media_type == "video":
-                    await bot.send_video(chat_id=CHANNEL_ID, video=file_id)
+                    await send_to_channel_with_retry(bot.send_video, chat_id=CHANNEL_ID, video=file_id)
                 elif media_type == "animation":
-                    await bot.send_animation(chat_id=CHANNEL_ID, animation=file_id)
+                    await send_to_channel_with_retry(bot.send_animation, chat_id=CHANNEL_ID, animation=file_id)
                 elif media_type == "document":
-                    await bot.send_document(chat_id=CHANNEL_ID, document=file_id)
+                    await send_to_channel_with_retry(bot.send_document, chat_id=CHANNEL_ID, document=file_id)
                 elif media_type == "audio":
-                    await bot.send_audio(chat_id=CHANNEL_ID, audio=file_id)
+                    await send_to_channel_with_retry(bot.send_audio, chat_id=CHANNEL_ID, audio=file_id)
                 elif media_type == "voice":
-                    await bot.send_voice(chat_id=CHANNEL_ID, voice=file_id)
+                    await send_to_channel_with_retry(bot.send_voice, chat_id=CHANNEL_ID, voice=file_id)
                 # Note: video_note doesn't support media groups in Telegram
 
         # Update last post time
@@ -1502,31 +1584,35 @@ async def handle_admin_message(message: Message):
                 )
 
                 # Send watermarked photo using input_file
-                await bot.send_photo(
+                await send_to_channel_with_retry(
+                    bot.send_photo,
                     chat_id=CHANNEL_ID,
                     photo=types.BufferedInputFile(
                         watermarked.getvalue(),
                         filename="watermarked.jpg"
                     )
-                    # No caption to remove origin names and URLs
                 )
             except Exception as e:
                 logger.error(f"Error processing photo watermark: {e}")
                 # Fallback to sending original photo if watermarking fails
-                await bot.send_photo(chat_id=CHANNEL_ID, photo=media.file_id)
+                await send_to_channel_with_retry(
+                    bot.send_photo,
+                    chat_id=CHANNEL_ID,
+                    photo=media.file_id
+                )
 
         elif media_type == "video":
-            await bot.send_video(chat_id=CHANNEL_ID, video=media.file_id)
+            await send_to_channel_with_retry(bot.send_video, chat_id=CHANNEL_ID, video=media.file_id)
         elif media_type == "animation":
-            await bot.send_animation(chat_id=CHANNEL_ID, animation=media.file_id)
+            await send_to_channel_with_retry(bot.send_animation, chat_id=CHANNEL_ID, animation=media.file_id)
         elif media_type == "video_note":
-            await bot.send_video_note(chat_id=CHANNEL_ID, video_note=media.file_id)
+            await send_to_channel_with_retry(bot.send_video_note, chat_id=CHANNEL_ID, video_note=media.file_id)
         elif media_type == "voice":
-            await bot.send_voice(chat_id=CHANNEL_ID, voice=media.file_id)
+            await send_to_channel_with_retry(bot.send_voice, chat_id=CHANNEL_ID, voice=media.file_id)
         elif media_type == "audio":
-            await bot.send_audio(chat_id=CHANNEL_ID, audio=media.file_id)
+            await send_to_channel_with_retry(bot.send_audio, chat_id=CHANNEL_ID, audio=media.file_id)
         elif media_type == "document":
-            await bot.send_document(chat_id=CHANNEL_ID, document=media.file_id)
+            await send_to_channel_with_retry(bot.send_document, chat_id=CHANNEL_ID, document=media.file_id)
 
         post_tracker.update_last_post_time(datetime.now(TIMEZONE))
         await message.reply("Message posted successfully.")
