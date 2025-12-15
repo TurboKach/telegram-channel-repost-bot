@@ -30,11 +30,17 @@ class ChannelRateLimiter:
     def __init__(self, min_interval: float = 0.7):
         self.min_interval = min_interval  # Minimum seconds between messages
         self.last_send_time = 0
-        self._lock = asyncio.Lock()
+        self._lock: Optional[asyncio.Lock] = None  # Lazy init for Python 3.10+ compatibility
+
+    def _get_lock(self) -> asyncio.Lock:
+        """Lazily create the lock when first needed (inside a running event loop)"""
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     async def wait_if_needed(self):
         """Wait if necessary to respect rate limits"""
-        async with self._lock:
+        async with self._get_lock():
             current_time = time.time()
             time_since_last = current_time - self.last_send_time
 
