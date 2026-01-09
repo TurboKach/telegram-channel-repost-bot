@@ -16,6 +16,10 @@ from PIL import Image, ImageDraw, ImageFont
 import random
 import time
 
+# Import Instagram downloader and video watermark modules
+from instagram_downloader import InstagramDownloader
+from video_watermark import VideoWatermarker
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -112,6 +116,14 @@ MAIN_ADMIN_ID = int(os.getenv('MAIN_ADMIN_ID'))
 TIMEZONE = pytz.timezone(os.getenv('TIMEZONE', 'UTC'))
 WATERMARK_TEXT = os.getenv('WATERMARK_TEXT', 'TEST_WATERMARK')
 
+# Instagram and video settings
+INSTAGRAM_ENABLED = os.getenv('INSTAGRAM_ENABLED', 'true').lower() == 'true'
+INSTAGRAM_THROTTLE_SECONDS = float(os.getenv('INSTAGRAM_THROTTLE_SECONDS', '5'))
+VIDEO_WATERMARK_ENABLED = os.getenv('VIDEO_WATERMARK_ENABLED', 'true').lower() == 'true'
+VIDEO_WATERMARK_BOUNCING = os.getenv('VIDEO_WATERMARK_BOUNCING', 'true').lower() == 'true'
+VIDEO_WATERMARK_FONT_SIZE = int(os.getenv('VIDEO_WATERMARK_FONT_SIZE', '24'))
+VIDEO_WATERMARK_SPEED = int(os.getenv('VIDEO_WATERMARK_SPEED', '2'))
+
 # Flood control settings
 MAX_SUGGESTIONS_PER_DAY = 20
 SUGGESTION_COOLDOWN_SECONDS = 2
@@ -151,6 +163,10 @@ ALLOWED_MEDIA_TYPES = [
 # Initialize bot and dispatcher
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+# Initialize Instagram downloader and video watermarker
+instagram_downloader = InstagramDownloader(throttle_interval=INSTAGRAM_THROTTLE_SECONDS)
+video_watermarker = VideoWatermarker(watermark_text=WATERMARK_TEXT)
 
 
 class PostTracker:
@@ -747,7 +763,59 @@ async def process_suggestion_action(callback_query: types.CallbackQuery):
                         )
 
             elif media_type == "video":
-                await send_to_channel_with_retry(bot.send_video, chat_id=CHANNEL_ID, video=media_ids[0])
+                # Add watermark to video if enabled
+                if VIDEO_WATERMARK_ENABLED:
+                    try:
+                        # Download the video
+                        file = await bot.get_file(media_ids[0])
+                        video_io = await bot.download_file(file.file_path)
+
+                        # Save to temp file
+                        import tempfile
+                        fd, temp_input = tempfile.mkstemp(suffix='.mp4', prefix='input_')
+                        os.close(fd)
+                        with open(temp_input, 'wb') as f:
+                            f.write(video_io.read())
+
+                        # Add watermark
+                        if VIDEO_WATERMARK_BOUNCING:
+                            watermarked_path = await video_watermarker.add_moving_watermark(
+                                temp_input,
+                                font_size=VIDEO_WATERMARK_FONT_SIZE,
+                                speed=VIDEO_WATERMARK_SPEED
+                            )
+                        else:
+                            watermarked_path = await video_watermarker.add_static_watermark(
+                                temp_input,
+                                font_size=VIDEO_WATERMARK_FONT_SIZE
+                            )
+
+                        if watermarked_path:
+                            # Send watermarked video
+                            with open(watermarked_path, 'rb') as video_file:
+                                await send_to_channel_with_retry(
+                                    bot.send_video,
+                                    chat_id=CHANNEL_ID,
+                                    video=types.BufferedInputFile(
+                                        video_file.read(),
+                                        filename="video.mp4"
+                                    )
+                                )
+                            # Clean up
+                            video_watermarker.cleanup_file(watermarked_path)
+                        else:
+                            # Fallback to original
+                            await send_to_channel_with_retry(bot.send_video, chat_id=CHANNEL_ID, video=media_ids[0])
+
+                        # Clean up temp file
+                        video_watermarker.cleanup_file(temp_input)
+
+                    except Exception as e:
+                        logger.error(f"Error watermarking video: {e}")
+                        # Fallback to sending original video
+                        await send_to_channel_with_retry(bot.send_video, chat_id=CHANNEL_ID, video=media_ids[0])
+                else:
+                    await send_to_channel_with_retry(bot.send_video, chat_id=CHANNEL_ID, video=media_ids[0])
             elif media_type == "animation":
                 await send_to_channel_with_retry(bot.send_animation, chat_id=CHANNEL_ID, animation=media_ids[0])
             elif media_type == "video_note":
@@ -1428,7 +1496,59 @@ async def handle_complete_admin_media_group(media_group_id: str):
             # For other media types, send each item individually with delay
             for file_id in media_ids:
                 if media_type == "video":
-                    await send_to_channel_with_retry(bot.send_video, chat_id=CHANNEL_ID, video=file_id)
+                    # Add watermark to video if enabled
+                    if VIDEO_WATERMARK_ENABLED:
+                        try:
+                            # Download the video
+                            file = await bot.get_file(file_id)
+                            video_io = await bot.download_file(file.file_path)
+
+                            # Save to temp file
+                            import tempfile
+                            fd, temp_input = tempfile.mkstemp(suffix='.mp4', prefix='input_')
+                            os.close(fd)
+                            with open(temp_input, 'wb') as f:
+                                f.write(video_io.read())
+
+                            # Add watermark
+                            if VIDEO_WATERMARK_BOUNCING:
+                                watermarked_path = await video_watermarker.add_moving_watermark(
+                                    temp_input,
+                                    font_size=VIDEO_WATERMARK_FONT_SIZE,
+                                    speed=VIDEO_WATERMARK_SPEED
+                                )
+                            else:
+                                watermarked_path = await video_watermarker.add_static_watermark(
+                                    temp_input,
+                                    font_size=VIDEO_WATERMARK_FONT_SIZE
+                                )
+
+                            if watermarked_path:
+                                # Send watermarked video
+                                with open(watermarked_path, 'rb') as video_file:
+                                    await send_to_channel_with_retry(
+                                        bot.send_video,
+                                        chat_id=CHANNEL_ID,
+                                        video=types.BufferedInputFile(
+                                            video_file.read(),
+                                            filename="video.mp4"
+                                        )
+                                    )
+                                # Clean up
+                                video_watermarker.cleanup_file(watermarked_path)
+                            else:
+                                # Fallback to original
+                                await send_to_channel_with_retry(bot.send_video, chat_id=CHANNEL_ID, video=file_id)
+
+                            # Clean up temp file
+                            video_watermarker.cleanup_file(temp_input)
+
+                        except Exception as e:
+                            logger.error(f"Error watermarking video in media group: {e}")
+                            # Fallback to sending original video
+                            await send_to_channel_with_retry(bot.send_video, chat_id=CHANNEL_ID, video=file_id)
+                    else:
+                        await send_to_channel_with_retry(bot.send_video, chat_id=CHANNEL_ID, video=file_id)
                 elif media_type == "animation":
                     await send_to_channel_with_retry(bot.send_animation, chat_id=CHANNEL_ID, animation=file_id)
                 elif media_type == "document":
@@ -1508,8 +1628,106 @@ async def handle_message(message: Message):
         await handle_user_suggestion(message)
 
 
+async def handle_instagram_download(message: Message):
+    """Handle Instagram video download from URL"""
+    user_id = message.from_user.id
+    url = message.text.strip()
+
+    # Notify user we're processing
+    status_msg = await message.reply("📥 Downloading Instagram video...")
+
+    try:
+        # Download the video
+        result = await instagram_downloader.download_video(url, user_id)
+
+        if 'error' in result:
+            await status_msg.edit_text(f"❌ {result['error']}")
+            return
+
+        file_path = result['file_path']
+        file_size_mb = result.get('file_size_mb', 0)
+
+        logger.info(f"Downloaded Instagram video: {file_path} ({file_size_mb:.1f}MB)")
+
+        # Update status
+        await status_msg.edit_text("🎨 Adding watermark to video...")
+
+        # Add watermark if enabled
+        watermarked_path = None
+        if VIDEO_WATERMARK_ENABLED:
+            try:
+                if VIDEO_WATERMARK_BOUNCING:
+                    watermarked_path = await video_watermarker.add_moving_watermark(
+                        file_path,
+                        font_size=VIDEO_WATERMARK_FONT_SIZE,
+                        speed=VIDEO_WATERMARK_SPEED
+                    )
+                else:
+                    watermarked_path = await video_watermarker.add_static_watermark(
+                        file_path,
+                        font_size=VIDEO_WATERMARK_FONT_SIZE
+                    )
+
+                if watermarked_path:
+                    logger.info(f"Watermark added: {watermarked_path}")
+                    # Use watermarked version
+                    final_path = watermarked_path
+                else:
+                    logger.warning("Watermarking failed, using original video")
+                    final_path = file_path
+
+            except Exception as e:
+                logger.error(f"Error watermarking video: {e}")
+                final_path = file_path
+        else:
+            final_path = file_path
+
+        # Update status
+        await status_msg.edit_text("📤 Uploading to channel...")
+
+        # Send to channel
+        with open(final_path, 'rb') as video_file:
+            await send_to_channel_with_retry(
+                bot.send_video,
+                chat_id=CHANNEL_ID,
+                video=types.BufferedInputFile(
+                    video_file.read(),
+                    filename="instagram_video.mp4"
+                )
+            )
+
+        # Update last post time
+        post_tracker.update_last_post_time(datetime.now(TIMEZONE))
+
+        # Notify admin
+        await status_msg.edit_text("✅ Instagram video posted successfully to channel!")
+
+        # Notify main admin
+        user_info = {
+            'id': user_id,
+            'username': message.from_user.username or f"User_{user_id}"
+        }
+        await notify_main_admin(user_info, f"posted Instagram video from {url}")
+
+    except Exception as e:
+        logger.error(f"Error processing Instagram video: {e}")
+        await status_msg.edit_text(f"❌ Error: {str(e)}")
+
+    finally:
+        # Clean up downloaded files
+        if 'file_path' in locals() and file_path:
+            instagram_downloader.cleanup_file(file_path)
+        if watermarked_path:
+            video_watermarker.cleanup_file(watermarked_path)
+
+
 async def handle_admin_message(message: Message):
     """Handle direct posting from admins"""
+    # Check for Instagram URL first (if enabled)
+    if INSTAGRAM_ENABLED and message.text and instagram_downloader.is_instagram_url(message.text):
+        await handle_instagram_download(message)
+        return
+
     # If it's a command or not media, ignore
     if message.text and message.text.startswith('/'):
         return
@@ -1608,7 +1826,59 @@ async def handle_admin_message(message: Message):
                 )
 
         elif media_type == "video":
-            await send_to_channel_with_retry(bot.send_video, chat_id=CHANNEL_ID, video=media.file_id)
+            # Add watermark to video if enabled
+            if VIDEO_WATERMARK_ENABLED:
+                try:
+                    # Download the video first
+                    file = await bot.get_file(media.file_id)
+                    video_io = await bot.download_file(file.file_path)
+
+                    # Save to temp file
+                    import tempfile
+                    fd, temp_input = tempfile.mkstemp(suffix='.mp4', prefix='input_')
+                    os.close(fd)
+                    with open(temp_input, 'wb') as f:
+                        f.write(video_io.read())
+
+                    # Add watermark
+                    if VIDEO_WATERMARK_BOUNCING:
+                        watermarked_path = await video_watermarker.add_moving_watermark(
+                            temp_input,
+                            font_size=VIDEO_WATERMARK_FONT_SIZE,
+                            speed=VIDEO_WATERMARK_SPEED
+                        )
+                    else:
+                        watermarked_path = await video_watermarker.add_static_watermark(
+                            temp_input,
+                            font_size=VIDEO_WATERMARK_FONT_SIZE
+                        )
+
+                    if watermarked_path:
+                        # Send watermarked video
+                        with open(watermarked_path, 'rb') as video_file:
+                            await send_to_channel_with_retry(
+                                bot.send_video,
+                                chat_id=CHANNEL_ID,
+                                video=types.BufferedInputFile(
+                                    video_file.read(),
+                                    filename="video.mp4"
+                                )
+                            )
+                        # Clean up
+                        video_watermarker.cleanup_file(watermarked_path)
+                    else:
+                        # Fallback to original
+                        await send_to_channel_with_retry(bot.send_video, chat_id=CHANNEL_ID, video=media.file_id)
+
+                    # Clean up temp file
+                    video_watermarker.cleanup_file(temp_input)
+
+                except Exception as e:
+                    logger.error(f"Error watermarking video: {e}")
+                    # Fallback to sending original video
+                    await send_to_channel_with_retry(bot.send_video, chat_id=CHANNEL_ID, video=media.file_id)
+            else:
+                await send_to_channel_with_retry(bot.send_video, chat_id=CHANNEL_ID, video=media.file_id)
         elif media_type == "animation":
             await send_to_channel_with_retry(bot.send_animation, chat_id=CHANNEL_ID, animation=media.file_id)
         elif media_type == "video_note":
@@ -1741,10 +2011,24 @@ async def handle_user_suggestion(message: Message):
         await send_post_to_admin(admin_id, post_id, pending_posts_manager.get_pending_post(post_id))
 
 
+async def cleanup_instagram_files_task():
+    """Background task to clean up old Instagram download files"""
+    while True:
+        try:
+            await asyncio.sleep(3600)  # Run every hour
+            instagram_downloader.cleanup_old_files(max_age_hours=1)
+        except Exception as e:
+            logger.error(f"Error in cleanup task: {e}")
+
+
 async def main():
     try:
         # Create task for media group processing
         asyncio.create_task(media_group_cleanup_task())
+
+        # Create task for Instagram file cleanup
+        if INSTAGRAM_ENABLED:
+            asyncio.create_task(cleanup_instagram_files_task())
 
         # Set default commands (empty) for all users
         try:
